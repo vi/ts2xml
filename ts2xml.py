@@ -18,6 +18,7 @@ def wait_for_sync_byte(f, o):
 
 
 program_map_pids = set()
+packetized_elementary_stream_pids = set()
 
 def output_program_association_table(f, o, length, payload_start):
     o.write("    <program_association_table>\n")
@@ -176,7 +177,7 @@ def output_program_map_table(f, o, length, payload_start):
             o.write("            <ES_info>"+binascii.hexlify(es_info)+"</ES_info>\n")
         o.write("        </stream>\n")
 
-        #program_map_pids.add(program_pid)
+        packetized_elementary_stream_pids.add(elementary_pid)
     if(section_length!=0):
         o.write("        <!-- section_length discrepancy -->\n")
     if not no_program_info_length:
@@ -193,6 +194,166 @@ def output_program_map_table(f, o, length, payload_start):
             o.write("        <rest>"+binascii.hexlify(rest)+"</rest>\n")
 
     o.write("    </program_map_table>\n")
+
+
+def output_packetized_elementary_stream(f, o, length, payload_start):
+    if payload_start:
+        o.write("    <elementary_stream_packet>\n")
+        byte0 = ord(f.read(1))
+        byte1 = ord(f.read(1))
+        byte2 = ord(f.read(1))
+        byte3 = ord(f.read(1))
+        byte4 = ord(f.read(1))
+        byte5 = ord(f.read(1))
+        if byte0 != 0 or byte1 != 0 or byte2 != 1:
+            o.write("        <!-- Start code is "+hex(byte0)+" "+hex(byte1)+" " +hex(byte2)+" instead of 000001 -->\n")
+        stream_id = byte3
+        stream_type = None
+        stream_type_comment = None
+        extension_present = False
+        if stream_id == 0xBD:
+            stream_type = "private_stream_1"
+            stream_type_comment = "non-MPEG audio, subpictures"
+            extension_present = True
+        elif stream_id == 0xBE:
+            stream_type = "padding_stream"
+            extension_present = False
+        elif stream_id == 0xBF:
+            stream_type = "private_stream_2"
+            stream_type_comment = "Navigation data"
+            extension_present = False
+        elif stream_id >= 0xC0 and stream_id <= 0xDF:
+            stream_type = "mpeg_audio_"+str(stream_id-0xC0)
+            extension_present = True
+        elif stream_id >= 0xE0 and stream_id <= 0xEF:
+            stream_type = "mpeg_video_"+str(stream_id-0xE0)
+            extension_present = True
+        else:
+            stream_type = "unknown_"+hex(stream_id)
+
+        packet_length = (byte4 << 8) | byte5
+
+        o.write("        <stream_type>"+stream_type+"</stream_type>\n")
+        o.write("        <packet_length>"+str(packet_length)+"</packet_length>\n")
+        
+        if extension_present:
+            byte6 = ord(f.read(1))
+            byte7 = ord(f.read(1))
+            byte8 = ord(f.read(1))
+                
+            if byte6 & 0xC0 != 0x80:
+                o.write("        <!-- extensions's reserved is not 10 -->\n")
+            pes_scrambling = (byte6 & 0x30 >> 4)
+            pes_priority = bool(byte6 & 0x08)
+            data_alignment_indicator = bool(byte6 & 0x04)
+            copyright = bool(byte6 & 0x02)
+            original = bool(byte6 & 0x01)
+            pts_present = bool(byte7 & 0x80)
+            dts_present = bool(byte7 & 0x40)
+            escr_present = bool(byte7 & 0x20)
+            es_rate_present = bool(byte7 & 0x10)
+            dsm_trick_mode_flag = bool(byte7 & 0x08)
+            additional_copy_info_present = bool(byte7 & 0x04)
+            PES_crc_present = bool(byte7 & 0x02)
+            PES_extension_flag = bool(byte7 & 0x01)
+            pes_header_data_length = byte8
+            length -= (9 + pes_header_data_length)
+
+
+            if pes_scrambling:
+                o.write("        <PES_scrambling>"+str(pes_scrambling)+"</PES_scrambling>\n")
+            if pes_priority:
+                o.write("        <PES_priority/>\n")
+            if data_alignment_indicator:
+                o.write("        <data_alignment_indicator/>\n")
+            if copyright:
+                o.write("        <copyright/>\n")
+            if original:
+                o.write("        <original/>\n")
+            if es_rate_present:
+                o.write("        <es_rate_present/>\n")
+            if dsm_trick_mode_flag:
+                o.write("        <dsm_trick_mode_flag/>\n")
+            if additional_copy_info_present:
+                o.write("        <additional_copy_info_present/>\n")
+            if PES_crc_present:
+                o.write("        <PES_crc_present/>\n")
+            if PES_extension_flag:
+                o.write("        <PES_extension_flag/>\n")
+            
+            def read_ts():
+                byte1 = ord(f.read(1))
+                byte2 = ord(f.read(1))
+                byte3 = ord(f.read(1))
+                byte4 = ord(f.read(1))
+                byte5 = ord(f.read(1))
+                if byte1 & 0xC0 != 0x00:
+                    o.write("        <!-- first two bits in [PD]TS are not 00 -->\n")
+                if byte5 & 0x01 != 0x01 or byte3 & 0x01 != 0x01 or byte1 & 0x01 != 0x01:
+                    o.write("        <!-- sync bits are not OK in [PD]TS -->\n")
+                ts = ((byte5 & 0xFE) >> 1) | \
+                     ((byte4 & 0xFF) << 7) | \
+                     ((byte3 & 0xFE) << 14) | \
+                     ((byte2 & 0xFF) << 22) | \
+                     ((byte1 & 0x0E) << 29)
+                ts = ts / 90000.0
+                return ts
+                
+
+            if pts_present:
+                pes_header_data_length -= 5
+                pts = read_ts()
+                o.write("        <presentation_timestamp>"+str(pts)+"</presentation_timestamp>\n")
+            if dts_present:
+                pes_header_data_length -= 5
+                dts = read_ts()
+                o.write("        <decode_timestamp>"+str(dts)+"</decode_timestamp>\n")
+            if escr_present:
+                pes_header_data_length -= 6
+                byte1 = ord(f.read(1))
+                byte2 = ord(f.read(1))
+                byte3 = ord(f.read(1))
+                byte4 = ord(f.read(1))
+                byte5 = ord(f.read(1))
+                byte6 = ord(f.read(1))
+                if byte1 & 0xC0 != 0x00:
+                    o.write("        <!-- first two bits of ESCR are not 00 -->\n")
+                if byte1 & 0x04 != 0x04 or byte3 & 0x04 != 0x04 or byte5 & 0x04 != 0x04 or byte6 & 0x01 != 0x01:
+                    o.write("        <!-- sync bits are not OK in ESCR -->\n")
+                escr_base = ((byte5 & 0xF8) >> 3) | \
+                            ((byte4 & 0xFF) << 5) | \
+                            ((byte3 & 0x03) << 13) | \
+                            ((byte3 & 0xF8) << 12) | \
+                            ((byte2 & 0xFF) << 18) | \
+                            ((byte1 & 0x03) << 26) | \
+                            ((byte1 & 0xF8) << 25)
+                escr_ext =  ((byte6 & 0xFE) >> 1) | \
+                            ((byte5 & 0x03) << 7)
+                escr = escr_base / 90000.0 + escr_ext / 27000000.0
+                o.write("        <elementary_stream_clock_reference>"+str(escr)+
+                        "</elementary_stream_clock_reference>\n"+
+                        "        <!-- note that I'm not sure very sure about the ESCR value -->\n")
+            if pes_header_data_length<0:
+                o.write("        <!-- something wront: remaining PES extended header is " + 
+                        str(pes_header_data_length) + " bytes -->\n")
+            elif pes_header_data_length:
+                resth = f.read(pes_header_data_length)
+                o.write("        <decoding_this_not_implemented>" + \
+                        binascii.hexlify(resth)+"</decoding_this_not_implemented>\n")
+
+        else:
+            length -= 6
+        
+        rest = f.read(length)
+        o.write("        <data>"+binascii.hexlify(rest)+"</data>\n")
+        o.write("    </elementary_stream_packet>\n")
+    else:
+        o.write("    <elementary_stream_packet_continue>\n")
+        rest = f.read(length)
+        o.write("        <data>"+binascii.hexlify(rest)+"</data>\n")
+        o.write("    </elementary_stream_packet_continue>\n")
+        
+        
 
 
 def output_adaptation_field(f, o):
@@ -304,10 +465,17 @@ def main():
                 output_program_association_table(f, o, payload_size, payload_unit_start) 
             elif pid in program_map_pids:
                 output_program_map_table(f, o, payload_size, payload_unit_start)
+            elif pid in packetized_elementary_stream_pids:
+                output_packetized_elementary_stream(f, o, payload_size, payload_unit_start)
             else:
-                payload = f.read(payload_size)
-                o.write("    <payload>"+binascii.hexlify(payload)+"</payload>\n")
+                if payload_size >= 10000 or payload_size < 0:
+                    o.write("    <!-- Malformed packet, resyncing -->\n")
+                else:
+                    payload = f.read(payload_size)
+                    o.write("    <payload>"+binascii.hexlify(payload)+"</payload>\n")
             o.write("</packet>\n")
+
+
             
     except StopIteration: pass
     except IOError: pass
