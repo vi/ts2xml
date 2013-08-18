@@ -68,7 +68,7 @@ Example invocation (extract raw stream of pid 0x100 to file):
     ./ts2xml.py < q.ts | xml2 | grep 'packet/pid\|/data=' | grep -A 1 '/pid=0x100' | grep 'data=' | cut -f 2- -d= | tr -d '\n' | xxd -r -p | pv > q.raw
 
 
-xml2ts should follow someday.
+If you want xml2ts for the reverse conversion, open [an issue](https://github.com/vi/ts2xml/issues/new?title=Please+add+xml2ts) on Github or wait until I need it for myself.
 
 
 For mkv2xml and xml2mkv see https://github.com/vi/mkvparse
